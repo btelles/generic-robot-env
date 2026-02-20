@@ -183,7 +183,7 @@ wheels = [
 
 [[package]]
 name = "generic-robot-env"
-version = "0.0.1"
+version = "0.0.1a0"
 source = { editable = "." }
 dependencies = [
     { name = "gym-hil" },

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "generic-robot-env"
-version = "0.0.1"
+version = "0.0.1-alpha"
 description = "A generic MuJoCo-based robot environment generator for LeRobot or Gymnasium-style experiments."
 readme = "README.md"
 requires-python = ">=3.12"
