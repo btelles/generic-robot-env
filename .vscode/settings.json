@@ -1,0 +1,12 @@
+{
+  "python.testing.unittestEnabled": false,
+  "python.testing.pytestEnabled": true,
+  "python.testing.pytestArgs": [
+    "--ignore=/home/bernie/code/generic-robot-env/mujoco_menagerie"
+  ],
+  "python.analysis.aiCodeActions": {
+    "implementAbstractClasses": true,
+    "generateSymbol": true,
+    "convertFormatString": true
+  }
+}
