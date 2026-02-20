@@ -2,13 +2,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import mujoco
 import numpy as np
 from gym_hil.controllers import opspace
 from gym_hil.mujoco_gym_env import GymRenderingSpec, MujocoGymEnv
 from gymnasium import spaces
+
+if TYPE_CHECKING:
+    MujocoGymEnvBase = MujocoGymEnv[dict[str, Any], np.ndarray]
+else:
+    MujocoGymEnvBase = MujocoGymEnv
 
 
 @dataclass
@@ -144,7 +149,7 @@ def extract_config_from_xml(xml_path: Path, robot_name: str) -> RobotConfig:
     )
 
 
-class GenericRobotEnv(MujocoGymEnv[dict[str, Any], np.ndarray]):
+class GenericRobotEnv(MujocoGymEnvBase):
     """Generic robot environment supporting OSC and joint control."""
 
     _rob_joint_ids: np.ndarray

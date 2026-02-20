@@ -9,3 +9,4 @@ mujoco_menagerie
 
 # Virtual environments
 .venv
+thumbnails/

@@ -32,6 +32,7 @@ dependencies = [
     "pytest>=9.0.2",
     "Pillow",
     "numpy",
+    "ruff>=0.15.2",
 ]
 
 [project.urls]
