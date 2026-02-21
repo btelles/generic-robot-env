@@ -33,6 +33,7 @@ dependencies = [
     "Pillow",
     "numpy",
     "ruff>=0.15.2",
+    "opencv-python>=4.13.0.92",
 ]
 
 [project.urls]

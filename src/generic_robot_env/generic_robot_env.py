@@ -45,6 +45,15 @@ class RobotConfig:
         return extract_config_from_xml(xml_path, robot_name)
 
 
+@dataclass(frozen=True)
+class EndEffectorRef:
+    """Resolved end-effector reference in the MuJoCo model."""
+
+    obj_type: Literal["site", "body"]
+    obj_id: int
+    name: str
+
+
 def extract_config_from_xml(xml_path: Path, robot_name: str) -> RobotConfig:
     """Load the model and auto-detect joints, actuators, and 'home' keyframe."""
     model = mujoco.MjModel.from_xml_path(xml_path.as_posix())
@@ -136,7 +145,7 @@ class GenericRobotEnv(MujocoGymEnvBase):
 
     _joint_ids: np.ndarray
     _actuator_ids: np.ndarray
-    _end_effector_site_id: int
+    _end_effector: EndEffectorRef
     _joint_qpos_indices: np.ndarray
     _dof_ids: np.ndarray
     _gripper_actuator_id: int | None
@@ -188,16 +197,11 @@ class GenericRobotEnv(MujocoGymEnvBase):
             dtype=np.int32,
         )
 
-        # Resolve end-effector site ID with fallback
-        try:
-            self._end_effector_site_id = self._model.site(
-                robot_config.end_effector_site_name
-            ).id
-        except Exception:
-            if self._model.nsite > 0:
-                self._end_effector_site_id = 0
-            else:
-                self._end_effector_site_id = self._model.nbody - 1
+        self._end_effector = self._resolve_end_effector_ref(
+            robot_config.end_effector_site_name
+        )
+        if self.control_mode == "osc" and self._end_effector.obj_type != "site":
+            self.control_mode = "joint"
 
         # Map joint IDs to qpos and DOF indices
         self._joint_qpos_indices = np.array(
@@ -318,6 +322,124 @@ class GenericRobotEnv(MujocoGymEnvBase):
                 low=-1.0, high=1.0, shape=(n_actuators,), dtype=np.float32
             )
 
+    def _resolve_end_effector_ref(self, preferred_name: str) -> EndEffectorRef:
+        body_obj_type = 1
+        site_id = mujoco.mj_name2id(
+            self._model,
+            mujoco.mjtObj.mjOBJ_SITE,
+            preferred_name,
+        )
+        if site_id >= 0:
+            site_name = mujoco.mj_id2name(
+                self._model,
+                mujoco.mjtObj.mjOBJ_SITE,
+                site_id,
+            )
+            return EndEffectorRef(
+                obj_type="site",
+                obj_id=site_id,
+                name=site_name if site_name else preferred_name,
+            )
+
+        if self._model.nsite > 0:
+            fallback_site_name = mujoco.mj_id2name(
+                self._model,
+                mujoco.mjtObj.mjOBJ_SITE,
+                0,
+            )
+            return EndEffectorRef(
+                obj_type="site",
+                obj_id=0,
+                name=fallback_site_name if fallback_site_name else "site_0",
+            )
+
+        body_candidates = [
+            preferred_name,
+            "attachment_site",
+            "pinch",
+            "ee",
+            "end_effector",
+            "tool_center",
+            "tcp",
+            "gripper",
+            "hand",
+            "flange",
+        ]
+        for candidate in body_candidates:
+            body_id = mujoco.mj_name2id(self._model, body_obj_type, candidate)
+            if body_id >= 0:
+                body_name = mujoco.mj_id2name(self._model, body_obj_type, body_id)
+                return EndEffectorRef(
+                    obj_type="body",
+                    obj_id=body_id,
+                    name=body_name if body_name else candidate,
+                )
+
+        fallback_body_id = self._model.nbody - 1
+        fallback_body_name = mujoco.mj_id2name(
+            self._model,
+            body_obj_type,
+            fallback_body_id,
+        )
+        return EndEffectorRef(
+            obj_type="body",
+            obj_id=fallback_body_id,
+            name=(
+                fallback_body_name if fallback_body_name else f"body_{fallback_body_id}"
+            ),
+        )
+
+    def _get_end_effector_position(self) -> np.ndarray:
+        if self._end_effector.obj_type == "site":
+            return self._data.site_xpos[self._end_effector.obj_id]
+        return cast(Any, self._data).xpos[self._end_effector.obj_id]
+
+    def _get_end_effector_rotation_matrix(self) -> np.ndarray:
+        if self._end_effector.obj_type == "site":
+            return self._data.site_xmat[self._end_effector.obj_id]
+        return cast(Any, self._data).xmat[self._end_effector.obj_id]
+
+    def _get_end_effector_quaternion(self) -> np.ndarray:
+        quaternion = np.zeros(4)
+        mujoco.mju_mat2Quat(quaternion, self._get_end_effector_rotation_matrix())
+        return quaternion
+
+    def _get_end_effector_jacobian(self) -> tuple[np.ndarray, np.ndarray]:
+        jacobian_position = np.zeros((3, self._model.nv))
+        jacobian_rotation = np.zeros((3, self._model.nv))
+        if self._end_effector.obj_type == "site":
+            mujoco.mj_jacSite(
+                self._model,
+                self._data,
+                jacobian_position,
+                jacobian_rotation,
+                self._end_effector.obj_id,
+            )
+        else:
+            jacobian_fn = getattr(mujoco, "mj_jacBody", None)
+            if jacobian_fn is None:
+                jacobian_fn = getattr(mujoco, "mj_jacBodyCom", None)
+            if jacobian_fn is None:
+                raise RuntimeError(
+                    "MuJoCo jacobian function for body end-effector is unavailable."
+                )
+            jacobian_fn(
+                self._model,
+                self._data,
+                jacobian_position,
+                jacobian_rotation,
+                self._end_effector.obj_id,
+            )
+        return jacobian_position, jacobian_rotation
+
+    def _get_end_effector_site_id(self) -> int:
+        if self._end_effector.obj_type != "site":
+            raise RuntimeError(
+                "Operational-space control requires a site end-effector reference, "
+                f"but got body '{self._end_effector.name}'."
+            )
+        return self._end_effector.obj_id
+
     def reset_robot(self) -> None:
         """Reset joints and controls to the configured home pose.
 
@@ -329,12 +451,8 @@ class GenericRobotEnv(MujocoGymEnvBase):
         mujoco.mj_forward(self._model, self._data)
 
         if self._model.nmocap > 0:
-            end_effector_position = self._data.site_xpos[self._end_effector_site_id]
-            end_effector_quaternion = np.zeros(4)
-            mujoco.mju_mat2Quat(
-                end_effector_quaternion,
-                self._data.site_xmat[self._end_effector_site_id],
-            )
+            end_effector_position = self._get_end_effector_position()
+            end_effector_quaternion = self._get_end_effector_quaternion()
             self._data.mocap_pos[0] = end_effector_position
             self._data.mocap_quat[0] = end_effector_quaternion
 
@@ -352,9 +470,7 @@ class GenericRobotEnv(MujocoGymEnvBase):
         joint_pos = self.data.qpos[self._joint_qpos_indices].astype(np.float32)
         joint_vel = self.data.qvel[self._dof_ids].astype(np.float32)
         gripper_pose = self.get_gripper_pose()
-        end_effector_pos = self._data.site_xpos[self._end_effector_site_id].astype(
-            np.float32
-        )
+        end_effector_pos = self._get_end_effector_position().astype(np.float32)
         return np.concatenate([joint_pos, joint_vel, gripper_pose, end_effector_pos])
 
     def render(self) -> list[np.ndarray]:
@@ -393,14 +509,8 @@ class GenericRobotEnv(MujocoGymEnvBase):
         self.reset_robot()
 
         if self.control_mode == "osc":
-            self._target_position = self._data.site_xpos[
-                self._end_effector_site_id
-            ].copy()
-            self._target_quaternion = np.zeros(4)
-            mujoco.mju_mat2Quat(
-                self._target_quaternion,
-                self._data.site_xmat[self._end_effector_site_id],
-            )
+            self._target_position = self._get_end_effector_position().copy()
+            self._target_quaternion = self._get_end_effector_quaternion()
         mujoco.mj_forward(self._model, self._data)
         return self._compute_observation(), {}
 
@@ -456,11 +566,12 @@ class GenericRobotEnv(MujocoGymEnvBase):
                 target_gripper * MAX_GRIPPER_COMMAND
             )
 
+        end_effector_site_id = self._get_end_effector_site_id()
         for _ in range(self._n_substeps):
             tau = opspace(
                 model=self._model,
                 data=self._data,
-                site_id=self._end_effector_site_id,
+                site_id=end_effector_site_id,
                 dof_ids=self._dof_ids,
                 pos=target_position,
                 ori=target_quaternion,
@@ -485,20 +596,13 @@ class GenericRobotEnv(MujocoGymEnvBase):
         joint_position = self._data.qpos[self._joint_qpos_indices].astype(np.float32)
         joint_velocity = self._data.qvel[self._dof_ids].astype(np.float32)
 
-        end_effector_position = self._data.site_xpos[self._end_effector_site_id]
-        end_effector_quaternion = np.zeros(4)
-        mujoco.mju_mat2Quat(
-            end_effector_quaternion, self._data.site_xmat[self._end_effector_site_id]
-        )
+        end_effector_position = self._get_end_effector_position()
+        end_effector_quaternion = self._get_end_effector_quaternion()
         end_effector_pose = np.concatenate(
             [end_effector_position, end_effector_quaternion]
         ).astype(np.float32)
 
-        jac_p = np.zeros((3, self._model.nv))
-        jac_r = np.zeros((3, self._model.nv))
-        mujoco.mj_jacSite(
-            self._model, self._data, jac_p, jac_r, self._end_effector_site_id
-        )
+        jac_p, jac_r = self._get_end_effector_jacobian()
 
         dq = self._data.qvel
         end_effector_linear_velocity = jac_p @ dq
@@ -730,7 +834,7 @@ class GenericTaskEnv(GenericRobotEnv):
         object_position = self._read_object_position()
 
         if self.reward_type == "dense":
-            end_effector_position = self._data.site_xpos[self._end_effector_site_id]
+            end_effector_position = self._get_end_effector_position()
             distance = np.linalg.norm(object_position - end_effector_position)
             close_reward = np.exp(-20 * distance)
             lift_reward = (object_position[2] - self._initial_object_height) / (
@@ -745,7 +849,7 @@ class GenericTaskEnv(GenericRobotEnv):
     def _is_success(self) -> bool:
         """Return true when object is close to gripper and lifted enough."""
         object_position = self._read_object_position()
-        end_effector_position = self._data.site_xpos[self._end_effector_site_id]
+        end_effector_position = self._get_end_effector_position()
         distance = np.linalg.norm(object_position - end_effector_position)
         lift = object_position[2] - self._initial_object_height
         return bool(distance < 0.05 and lift > self._lift_success_threshold)
